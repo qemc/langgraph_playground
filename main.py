@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.checkpoint.memory import MemorySaver
+import pprint
 
 dotenv.load_dotenv()
 
@@ -65,6 +66,7 @@ def create_prompt(
         return {
             **input,
             output_key: raw_text,
+            "api_response":response, 
             "tokens_so_far": new_total_tokens,
             "prompt_messages": prompts
         }
@@ -114,7 +116,8 @@ class QuizzState(TypedDict):
     difficulty: str
     user_answers: Annotated[List[BaseMessage], add_messages]
     questions: Annotated[List[BaseMessage], add_messages]
-    assesments: List[JudgeAnswer]
+    assesments: Annotated[List[BaseMessage], add_messages]
+    judge_tools_buffer: Annotated[List[BaseMessage], add_messages]
 
 
 def quiz_generator_node(state: QuizzState):
@@ -152,7 +155,6 @@ def quiz_generator_node(state: QuizzState):
 
     new_token_so_far = int(tokens_so_far) + int(tokens_used)
 
-    
     print(question)
     
     return {
@@ -217,8 +219,8 @@ def judge_node(state: TypedDict):
     prompt = create_prompt(llm_with_tools,'resp', prompt)
     
 
-    question = state['questions'][-1]
-    user_answer = state['user_answers'][-1]
+    question = state['questions'][-1].content
+    user_answer = state['user_answers'][-1].content
 
     result = prompt.invoke({
         "topic": topic,
@@ -231,10 +233,13 @@ def judge_node(state: TypedDict):
     new_token_so_far = int(tokens_so_far) + int(tokens_used)
 
     assesment = result.get("resp")
-    current_assesments = state.get('assesments', [])
+
+    print(new_token_so_far)
+    print(50*'#')
+    pprint.pprint(result.get('api_response'))
 
     return {
-        'assesments': current_assesments + [assesment],
+        'assesments': [assesment],
         'tokens_so_far': new_token_so_far
     }
 
