@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.checkpoint.memory import MemorySaver
 import pprint
+from langgraph.prebuilt import ToolNode
 
 dotenv.load_dotenv()
 
@@ -46,9 +47,10 @@ def create_prompt(
         else:
             raw_text = response
 
-        if not raw_text:
-            raise ValueError(f"Router error with prompt: {prompts}")
-
+        has_tool_calls = hasattr(response, 'tool_calls') and bool(response.tool_calls)
+        
+        if not raw_text and not has_tool_calls:
+            raise ValueError(f"create_prompt function error: {prompts}")
 
         tokens_used = 0
         if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -73,9 +75,7 @@ def create_prompt(
 
     return RunnableLambda(_func)
 
-class JudgeAnswer(BaseModel):
-    result: str = Field(description='the result of the answer assesment, can be only True, False or Tool') # TypeScript :(((
-    just: str = Field(description='the justification of the result. The the judge resturned that result?')
+
 
 @tool
 def get_hint_tool(question: str, topic: str):
@@ -106,7 +106,14 @@ def get_hint_tool(question: str, topic: str):
 
     return str(res.get('resp')).strip()
     
-tools = [get_hint_tool]
+class JudgeAnswer(BaseModel):
+
+    '''Call this tool when you are ready to submit the final task assesment'''
+    result: bool = Field(description='the result of the answer assesment, can be only True or False') # TypeScript :(((
+    just: str = Field(description='the justification of the result. The the judge resturned that result?')
+
+
+tools = [get_hint_tool, JudgeAnswer]
 
 class QuizzState(TypedDict):
     hitPoints: int
@@ -165,6 +172,7 @@ def quiz_generator_node(state: QuizzState):
 def human_node(state:TypedDict):
     pass
 
+hint_node = ToolNode([get_hint_tool])
 
 def judge_node(state: TypedDict):
 
@@ -172,38 +180,11 @@ def judge_node(state: TypedDict):
 
     prompt = system_user_prompt(
         system_prompt='''
-        You are a judge whos job is to assess the truth of the answer provided by 
-        the user to the question.
 
-        You are an expert on the following topic: {topic} 
+        You are a quiz judge.
+        - If the user asks for help or is stuck, call the 'provide_hint' tool.
+        - If the user provides an answer, YOU MUST call the 'JudgeAnswer' tool to submit your verdict.
 
-        Both the question and the answer are provided in the contect within
-        the user prompt.
-
-        Ypour answer should be provided in json format (it needs
-        to be correct, later on it will be parsed to the dict object.)
-        The format:
-        {{
-            "result": "true" # or false, depends on the user answer. Only one word
-            "just": "here you provide your justification of the assesment." # If this was true, you explain why, and if false you explain why.        
-        }}
-        Example input:
-        Question:
-        In a standard football match, how many players are on the field for one 
-        team at the start of the game (excluding substitutions)?
-        A) 9
-        B) 10
-        C) 11
-        D) 12
-
-        User answer:
-        9
-
-        Your answer would be:
-        {{
-            "result": "false" 
-            "just": "The football team contains 11 players. 10 in field, and one goalkeeper"
-        }}
         ''',
         user_prompt='''
         Question:
@@ -212,7 +193,6 @@ def judge_node(state: TypedDict):
         {user_answer}
         '''
     )
-
     topic = state['topic']
     tokens_so_far = state['tokens_so_far']
 
@@ -229,33 +209,119 @@ def judge_node(state: TypedDict):
     })
 
     tokens_used = str(result.get("tokens_so_far")).strip()
-
     new_token_so_far = int(tokens_so_far) + int(tokens_used)
-
-    assesment = result.get("resp")
+    assesment = result.get("api_response")
 
     print(new_token_so_far)
     print(50*'#')
     pprint.pprint(result.get('api_response'))
+    print(50*'#')
+    pprint.pprint(result.get('resp'))
 
     return {
         'assesments': [assesment],
         'tokens_so_far': new_token_so_far
     }
 
+def parser_node(state: TypedDict):
+
+    last_assesment = state['assesments'][-1]
+    parser_call = last_assesment.tool_calls[0]
+    assessment_result = JudgeAnswer(**parser_call['args'])
+
+    current_score = int(state['score'])
+    current_hitpoints = int(state['hitPoints'])
+
+    if assessment_result.result:
+        current_score += 1
+    else:
+        current_hitpoints -= 1
+
+
+    print(50*'#')
+    print(f'Your current score: \n {current_score}')
+    print(50*'#')
+    print(f'Your current hit points: \n {current_hitpoints}')
+
+    return {
+        'score': current_score,
+        'hitPoints': current_hitpoints
+    }
+
+def after_assesment_router(state: TypedDict):
+
+    last_assesment = state['assesments'][-1]
+
+    if not last_assesment.tool_calls:
+        print("An Error occurred")
+        return "__end__"
+
+    tool_name = last_assesment.tool_calls[0]['name']
+
+    if tool_name == 'get_hint_tool':
+        return 'hint_tool'
+    elif tool_name == 'JudgeAnswer':
+        return 'parser'
+
+    print("An Error occurred")
+    return '__end__'
+
+def final_router(state: TypedDict):
+
+    current_score = int(state['score'])
+    current_hitpoints = int(state['hitPoints'])
+
+    if current_hitpoints == 0:
+        print('You lost')
+        return '__end__'
+
+    elif current_score == 3:
+        print('You won')
+        return '__end__'
+    
+    elif current_score < 3:
+        return 'generator'
+    
+    else:
+        print("An Error occurred")
+        return '__end__'
+
+    
+    
 
 workflow = StateGraph(QuizzState)
 
-workflow.add_node('generator',quiz_generator_node)
-workflow.add_node('judge',judge_node)
+workflow.add_node('generator', quiz_generator_node)
 workflow.add_node('human', human_node)
+workflow.add_node('judge', judge_node)
+workflow.add_node('hint_tool', hint_node)
+workflow.add_node('parser', parser_node)
+
 
 workflow.set_entry_point('generator')
 
 workflow.add_edge('generator', 'human')
 workflow.add_edge('human', 'judge')
 
-workflow.add_edge('judge', END)
+workflow.add_conditional_edges(
+    'judge',
+    after_assesment_router,
+    {
+        'hint_tool': 'hint_tool',
+        'parser': 'parser',
+        '__end__': END
+    }
+)
+
+workflow.add_edge('hint_tool', 'human') 
+workflow.add_conditional_edges(
+    'parser',
+    final_router,
+    {
+        'generator': 'generator', 
+        '__end__': END            
+    }
+)
 
 memory = MemorySaver()
 
@@ -291,7 +357,6 @@ def run_hitl():
             break
         
         user_input = input("Type your answer: ")
-
         if user_input.lower() in ['q', 'quit']:
             print("Exiting...")
             break
@@ -305,7 +370,9 @@ def run_hitl():
 # To Do:
 # Figure out human in the loop - done
 # what if I can use a chain?   - done (with the custom wrapper)
-# Implement tool calling!!!
+# Implement tool calling!!! - done
+# implement prompt locig to avoid same questions
+# implement fix for hint calling
 
 
 if __name__ == "__main__":
