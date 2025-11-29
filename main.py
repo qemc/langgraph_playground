@@ -9,10 +9,9 @@ from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplat
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
-from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.checkpoint.memory import MemorySaver
 import pprint
-from langgraph.prebuilt import ToolNode
+import operator
 
 dotenv.load_dotenv()
 
@@ -79,7 +78,6 @@ def create_prompt(
 
 @tool
 def get_hint_tool(question: str, topic: str):
-
     '''
     A tool to receive a hint when the user asks for it.
     '''
@@ -112,10 +110,14 @@ class JudgeAnswer(BaseModel):
     result: bool = Field(description='the result of the answer assesment, can be only True or False') # TypeScript :(((
     just: str = Field(description='the justification of the result. The the judge resturned that result?')
 
+class QuestionHintDict(TypedDict):
+    question: str
+    hint: str
 
 tools = [get_hint_tool, JudgeAnswer]
 
 class QuizzState(TypedDict):
+
     hitPoints: int
     score: int
     tokens_so_far: float
@@ -125,6 +127,8 @@ class QuizzState(TypedDict):
     questions: Annotated[List[BaseMessage], add_messages]
     assesments: Annotated[List[BaseMessage], add_messages]
     judge_tools_buffer: Annotated[List[BaseMessage], add_messages]
+    hints: Annotated[List[QuestionHintDict], operator.add]
+
 
 
 def quiz_generator_node(state: QuizzState):
@@ -172,9 +176,30 @@ def quiz_generator_node(state: QuizzState):
 def human_node(state:TypedDict):
     pass
 
-hint_node = ToolNode([get_hint_tool])
+def hint_node(state: QuizzState):
 
-def judge_node(state: TypedDict):
+    last_assessment = state['assesments'][-1]
+    
+    if not last_assessment.tool_calls:
+        return {"hints": []}
+
+    tool_call_data = last_assessment.tool_calls[0]
+    function_args = tool_call_data['args']
+
+    generated_hint_text = get_hint_tool.invoke(function_args)
+
+    question_hints: QuestionHintDict = {
+        'question': function_args['question'],
+        'hint': generated_hint_text
+    }
+
+    print(generated_hint_text)
+
+    return{
+        'hints': [question_hints]
+    }
+
+def judge_node(state: QuizzState):
 
     llm_with_tools = llm.bind_tools(tools)
 
@@ -290,6 +315,7 @@ def final_router(state: TypedDict):
     
 
 workflow = StateGraph(QuizzState)
+workflow.set_entry_point('generator')
 
 workflow.add_node('generator', quiz_generator_node)
 workflow.add_node('human', human_node)
@@ -297,12 +323,9 @@ workflow.add_node('judge', judge_node)
 workflow.add_node('hint_tool', hint_node)
 workflow.add_node('parser', parser_node)
 
-
-workflow.set_entry_point('generator')
-
 workflow.add_edge('generator', 'human')
 workflow.add_edge('human', 'judge')
-
+workflow.add_edge('hint_tool', 'human') 
 workflow.add_conditional_edges(
     'judge',
     after_assesment_router,
@@ -312,8 +335,6 @@ workflow.add_conditional_edges(
         '__end__': END
     }
 )
-
-workflow.add_edge('hint_tool', 'human') 
 workflow.add_conditional_edges(
     'parser',
     final_router,
@@ -322,9 +343,7 @@ workflow.add_conditional_edges(
         '__end__': END            
     }
 )
-
 memory = MemorySaver()
-
 
 app = workflow.compile(
     checkpointer=memory,
@@ -341,7 +360,6 @@ initial_state = {
     'questions': [],
     'assesments': []
 }
-
 
 def run_hitl():
 
@@ -371,9 +389,9 @@ def run_hitl():
 # Figure out human in the loop - done
 # what if I can use a chain?   - done (with the custom wrapper)
 # Implement tool calling!!! - done
-# implement prompt locig to avoid same questions
-# implement fix for hint calling
-
+# implement fix for hint calling - done
+# implement prompt logic to avoid same questions
+# implement fiexes for UX 
 
 if __name__ == "__main__":
     run_hitl()
