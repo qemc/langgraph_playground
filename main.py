@@ -1,4 +1,3 @@
-from openai._module_client import webhooks
 from langgraph.graph.state import StateGraph, END
 from langchain_core.runnables.base import RunnableLambda
 import dotenv
@@ -7,7 +6,7 @@ from typing import Annotated, TypedDict, List
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -15,8 +14,31 @@ import os
 import operator
 
 dotenv.load_dotenv()
-
 llm = ChatOpenAI(model = 'gpt-5-nano')
+
+class QuizzState(TypedDict):
+
+    hitPoints: int
+    score: int
+    tokens_so_far: float
+    topic: str
+    difficulty: str
+    user_answers: Annotated[List[BaseMessage], add_messages]
+    questions: Annotated[List[BaseMessage], add_messages]
+    assesments: Annotated[List[BaseMessage], add_messages]
+    judge_tools_buffer: Annotated[List[BaseMessage], add_messages]
+    hints: Annotated[List[QuestionHintDict], operator.add]
+
+class JudgeAnswer(BaseModel):
+
+    '''Call this tool when you are ready to submit the final task assesment'''
+    result: bool = Field(description='the result of the answer assesment, can be only True or False') # TypeScript :(((
+    just: str = Field(description='the justification of the result. The the judge resturned that result?')
+
+class QuestionHintDict(TypedDict):
+    question: str
+    hint: str
+
 
 def system_user_prompt(
     system_prompt: str,
@@ -75,8 +97,6 @@ def create_prompt(
 
     return RunnableLambda(_func)
 
-
-
 @tool
 def get_hint_tool(question: str, topic: str):
     '''
@@ -108,36 +128,11 @@ def get_hint_tool(question: str, topic: str):
         'api_response': res.get('api_response')
     } 
     
-class JudgeAnswer(BaseModel):
-
-    '''Call this tool when you are ready to submit the final task assesment'''
-    result: bool = Field(description='the result of the answer assesment, can be only True or False') # TypeScript :(((
-    just: str = Field(description='the justification of the result. The the judge resturned that result?')
-
-class QuestionHintDict(TypedDict):
-    question: str
-    hint: str
-
-
-
 tools = [get_hint_tool, JudgeAnswer]
-
-class QuizzState(TypedDict):
-
-    hitPoints: int
-    score: int
-    tokens_so_far: float
-    topic: str
-    difficulty: str
-    user_answers: Annotated[List[BaseMessage], add_messages]
-    questions: Annotated[List[BaseMessage], add_messages]
-    assesments: Annotated[List[BaseMessage], add_messages]
-    judge_tools_buffer: Annotated[List[BaseMessage], add_messages]
-    hints: Annotated[List[QuestionHintDict], operator.add]
 
 def stats_node(state: QuizzState):
     
-    os.system('clear')
+    os.system('clear all')
 
     topic = state['topic']
     tokens_so_far = state['tokens_so_far']
@@ -331,8 +326,7 @@ def final_router(state: TypedDict):
         print("An Error occurred")
         return '__end__'
 
-    
-    
+     
 workflow = StateGraph(QuizzState)
 workflow.set_entry_point('stats')
 
@@ -414,8 +408,8 @@ def run_hitl():
 # implement fix for hint calling - done
 # implement prompt logic to avoid same questions - done
 
-# implement manual 'next question' step
-# bring some fixes to ux (already not that bad)
+# implement manual 'next question' step (implement routing capabilities withn the hitl function)
+# implement a printing function across all nodes (rich lib ?)
 
 if __name__ == "__main__":
     run_hitl()
