@@ -1,3 +1,4 @@
+from openai._module_client import webhooks
 from langgraph.graph.state import StateGraph, END
 from langchain_core.runnables.base import RunnableLambda
 import dotenv
@@ -10,7 +11,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-import pprint
+import os
 import operator
 
 dotenv.load_dotenv()
@@ -102,7 +103,10 @@ def get_hint_tool(question: str, topic: str):
         'topic': topic
     })
 
-    return str(res.get('resp')).strip()
+    return {
+        'hint': str(res.get('resp')).strip(),
+        'api_response': res.get('api_response')
+    } 
     
 class JudgeAnswer(BaseModel):
 
@@ -113,6 +117,8 @@ class JudgeAnswer(BaseModel):
 class QuestionHintDict(TypedDict):
     question: str
     hint: str
+
+
 
 tools = [get_hint_tool, JudgeAnswer]
 
@@ -129,7 +135,31 @@ class QuizzState(TypedDict):
     judge_tools_buffer: Annotated[List[BaseMessage], add_messages]
     hints: Annotated[List[QuestionHintDict], operator.add]
 
+def stats_node(state: QuizzState):
+    
+    os.system('clear')
 
+    topic = state['topic']
+    tokens_so_far = state['tokens_so_far']
+
+    current_score = int(state['score'])
+    current_hitpoints = int(state['hitPoints'])
+
+    print(f'Your current score: {current_score}')
+    print(50*'#')
+    print(f'Your current hit points: {current_hitpoints}')
+    print(50*'#')
+    print(f'Topic: {topic}')
+    print(50*'#')
+    print(f'Tokens so far: {tokens_so_far}')
+
+def calc_tokens(result, state: QuizzState):
+
+    tokens_so_far = state['tokens_so_far']
+    tokens_used = str(result.get("tokens_so_far")).strip()
+    new_token_so_far = int(tokens_so_far) + int(tokens_used)
+
+    return new_token_so_far
 
 def quiz_generator_node(state: QuizzState):
 
@@ -143,33 +173,38 @@ def quiz_generator_node(state: QuizzState):
             1. Ask exactly one multiple-choice question.
             2. Provide 4 options (A, B, C, D).
             3. Do NOT reveal the answer yet.
-            4. Wait for the user to reply.:
+            4. Wait for the user to reply.
+            5. Do not ask the questions that were already asked: here is the list: {questions}
+            6. Your questions should be different type than the questions already asked.
         ''', 
         user_prompt='''
-
             Generate questions according to system prompt.
         ''' 
     )
     
     topic = state['topic']
     difficulty = state['difficulty']
-    tokens_so_far = state['tokens_so_far']
-    
+    already_asked_questions_aimessage = state['questions']
+    already_asked_questions_content = [aimessage_question.content for aimessage_question in already_asked_questions_aimessage]
+
     prompt = create_prompt(llm,'resp', prompt)
     
     result = prompt.invoke({
         "topic": topic,
-        "difficulty": difficulty
+        "difficulty": difficulty,
+        "questions": already_asked_questions_content
     })
-    question = str(result.get("resp")).strip()
-    tokens_used = str(result.get("tokens_so_far")).strip()
 
-    new_token_so_far = int(tokens_so_far) + int(tokens_used)
-
-    print(question)
+    question_to_print = str(result.get("resp")).strip()
+    question_as_aimessage = result.get("api_response")
     
+    new_token_so_far = calc_tokens(result, state) # Tokens can be counted at the end of Agent job or at reducer function
+
+    print(question_to_print)
+    print(already_asked_questions_content)
+
     return {
-        'questions': [question],
+        'questions': [question_as_aimessage],
         'tokens_so_far': new_token_so_far
     }
 
@@ -190,13 +225,15 @@ def hint_node(state: QuizzState):
 
     question_hints: QuestionHintDict = {
         'question': function_args['question'],
-        'hint': generated_hint_text
+        'hint': generated_hint_text['hint']
     }
 
+    new_token_so_far = calc_tokens(generated_hint_text['api_response'], state)
     print(generated_hint_text)
 
     return{
-        'hints': [question_hints]
+        'hints': [question_hints],
+        'tokens_so_far': new_token_so_far
     }
 
 def judge_node(state: QuizzState):
@@ -219,29 +256,18 @@ def judge_node(state: QuizzState):
         '''
     )
     topic = state['topic']
-    tokens_so_far = state['tokens_so_far']
-
-    prompt = create_prompt(llm_with_tools,'resp', prompt)
-    
-
     question = state['questions'][-1].content
     user_answer = state['user_answers'][-1].content
 
+    prompt = create_prompt(llm_with_tools,'resp', prompt)
     result = prompt.invoke({
         "topic": topic,
         "user_answer": user_answer,
         "question":question
     })
 
-    tokens_used = str(result.get("tokens_so_far")).strip()
-    new_token_so_far = int(tokens_so_far) + int(tokens_used)
+    new_token_so_far = calc_tokens(result, state)
     assesment = result.get("api_response")
-
-    print(new_token_so_far)
-    print(50*'#')
-    pprint.pprint(result.get('api_response'))
-    print(50*'#')
-    pprint.pprint(result.get('resp'))
 
     return {
         'assesments': [assesment],
@@ -261,12 +287,6 @@ def parser_node(state: TypedDict):
         current_score += 1
     else:
         current_hitpoints -= 1
-
-
-    print(50*'#')
-    print(f'Your current score: \n {current_score}')
-    print(50*'#')
-    print(f'Your current hit points: \n {current_hitpoints}')
 
     return {
         'score': current_score,
@@ -313,16 +333,17 @@ def final_router(state: TypedDict):
 
     
     
-
 workflow = StateGraph(QuizzState)
-workflow.set_entry_point('generator')
+workflow.set_entry_point('stats')
 
 workflow.add_node('generator', quiz_generator_node)
 workflow.add_node('human', human_node)
 workflow.add_node('judge', judge_node)
 workflow.add_node('hint_tool', hint_node)
 workflow.add_node('parser', parser_node)
+workflow.add_node('stats', stats_node)
 
+workflow.add_edge('stats', 'generator')
 workflow.add_edge('generator', 'human')
 workflow.add_edge('human', 'judge')
 workflow.add_edge('hint_tool', 'human') 
@@ -339,7 +360,7 @@ workflow.add_conditional_edges(
     'parser',
     final_router,
     {
-        'generator': 'generator', 
+        'generator': 'stats', 
         '__end__': END            
     }
 )
@@ -386,12 +407,15 @@ def run_hitl():
 
 
 # To Do:
+
 # Figure out human in the loop - done
-# what if I can use a chain?   - done (with the custom wrapper)
+# what if I can use a chain? - done (with the custom wrapper)
 # Implement tool calling!!! - done
 # implement fix for hint calling - done
-# implement prompt logic to avoid same questions
-# implement fiexes for UX 
+# implement prompt logic to avoid same questions - done
+
+# implement manual 'next question' step
+# bring some fixes to ux (already not that bad)
 
 if __name__ == "__main__":
     run_hitl()
