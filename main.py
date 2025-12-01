@@ -37,6 +37,7 @@ class QuizzState(TypedDict):
     questions: Annotated[List[BaseMessage], add_messages]
     assessments: Annotated[List[BaseMessage], add_messages]
     hints: Annotated[List[QuestionHintDict], operator.add]
+    need_to_score: int
 
 def system_user_prompt(
     system_prompt: str,
@@ -83,8 +84,6 @@ def create_prompt(
         prev_tokens = input.get("tokens_so_far", 0)
         new_total_tokens = tokens_used + prev_tokens
 
-        #print(raw_text)
-
         return {
             **input,
             output_key: raw_text,
@@ -98,7 +97,9 @@ def create_prompt(
 @tool
 def get_hint_tool(question: str, topic: str):
     '''
-    A tool to receive a hint when the user asks for it.
+    A tool to receive a hint when the user asks for it. To call this tool 
+    user MUST ask you for a help or hint DIRECTLY!! The hint cannot be called 
+    as a third option. 
     '''
 
     prompt = system_user_prompt(
@@ -109,6 +110,7 @@ def get_hint_tool(question: str, topic: str):
         The hint should be 1-2 sentences and only this. 
         You should return a normal string with the hint without any additional information. 
         The question is related to the {topic}
+        You cannot provide any direct and indirect answer to the question. It needs to be a hint. 
         ''',
         user_prompt='''
         The question:
@@ -139,17 +141,17 @@ def stats_node(state: QuizzState):
     current_hitpoints = int(state['hitPoints'])
 
     print(f'Your current score: {current_score}')
-    print(50*'#')
+    print(10*'-')
     print(f'Your current hit points: {current_hitpoints}')
-    print(50*'#')
+    print(10*'-')
     print(f'Topic: {topic}')
-    print(50*'#')
+    print(10*'-')
     print(f'Tokens so far: {tokens_so_far}')
 
 def calc_tokens(result, state: QuizzState):
 
     tokens_so_far = state['tokens_so_far']
-    tokens_used = str(result.get("tokens_so_far")).strip()
+    tokens_used = str(result.get("tokens_so_far", 0))
     new_token_so_far = int(tokens_so_far) + int(tokens_used)
 
     return new_token_so_far
@@ -166,12 +168,13 @@ def quiz_generator_node(state: QuizzState):
             1. Ask exactly one multiple-choice question.
             2. Provide 4 options (A, B, C, D).
             3. Do NOT reveal the answer yet.
-            4. Wait for the user to reply.
+            4. User will provide the answer manually
             5. Do not ask the questions that were already asked: here is the list: {questions}
-            6. Your questions should be different type than the questions already asked.
+            6. Your questions should be different type than the questions already asked. Please see the questions above (already asked)
+
         ''', 
         user_prompt='''
-            Generate questions according to system prompt.
+            Generate question according to system prompt.
         ''' 
     )
     
@@ -193,8 +196,8 @@ def quiz_generator_node(state: QuizzState):
     
     new_token_so_far = calc_tokens(result, state) # Tokens can be counted at the end of Agent job or at reducer function
 
+    print(10*'-')
     print(question_to_print)
-    print(already_asked_questions_content)
 
     return {
         'questions': [question_as_aimessage],
@@ -221,8 +224,9 @@ def hint_node(state: QuizzState):
         'hint': generated_hint_text['hint']
     }
 
-    new_token_so_far = calc_tokens(generated_hint_text['api_response'], state)
-    print(generated_hint_text)
+    new_token_so_far = calc_tokens(generated_hint_text, state)
+    print(10*'-')
+    print(f'Hint: {generated_hint_text['hint']}')
 
     return{
         'hints': [question_hints],
@@ -273,6 +277,10 @@ def parser_node(state: TypedDict):
     parser_call = last_assesment.tool_calls[0]
     assessment_result = JudgeAnswer(**parser_call['args'])
 
+    print(10*'-')
+    print(f'Result: {assessment_result.result}')
+    print(f'Justification: {assessment_result.just}')
+
     current_score = int(state['score'])
     current_hitpoints = int(state['hitPoints'])
 
@@ -308,6 +316,7 @@ def final_router(state: TypedDict):
 
     current_score = int(state['score'])
     current_hitpoints = int(state['hitPoints'])
+    need_to_score = int(state['need_to_score'])
 
     if current_hitpoints == 0:
         print('You lost')
@@ -317,7 +326,7 @@ def final_router(state: TypedDict):
         print('You won')
         return '__end__'
     
-    elif current_score < 3:
+    elif current_score < need_to_score:
         return 'generator'
     
     else:
@@ -329,16 +338,19 @@ workflow = StateGraph(QuizzState)
 workflow.set_entry_point('stats')
 
 workflow.add_node('generator', quiz_generator_node)
-workflow.add_node('human', human_node)
+workflow.add_node('human_answer', human_node)
+workflow.add_node('human_next', human_node)
 workflow.add_node('judge', judge_node)
 workflow.add_node('hint_tool', hint_node)
 workflow.add_node('parser', parser_node)
 workflow.add_node('stats', stats_node)
 
 workflow.add_edge('stats', 'generator')
-workflow.add_edge('generator', 'human')
-workflow.add_edge('human', 'judge')
-workflow.add_edge('hint_tool', 'human') 
+workflow.add_edge('generator', 'human_answer')
+workflow.add_edge('human_answer', 'judge')
+workflow.add_edge('hint_tool', 'human_answer') 
+workflow.add_edge('human_next', 'stats')
+
 workflow.add_conditional_edges(
     'judge',
     after_assesment_router,
@@ -352,7 +364,7 @@ workflow.add_conditional_edges(
     'parser',
     final_router,
     {
-        'generator': 'stats', 
+        'generator': 'human_next', 
         '__end__': END            
     }
 )
@@ -360,76 +372,57 @@ memory = MemorySaver()
 
 app = workflow.compile(
     checkpointer=memory,
-    interrupt_before=['human']
+    interrupt_before=['human_answer', 'human_next']
 )
 
 initial_state = {
     'hitPoints': 3,
     'score': 0,
     'tokens_so_far': 0,
-    'topic': 'football',
+    'topic': 'Computer Science',
     'difficulty': 'easy',
     'user_answers': [],
     'questions': [],
     'assessments': [],
-    'hints': []
+    'hints': [],
+    'need_to_score':3
 }
  
-
-
 def run_hitl():
-
-    config = {'configurable': {"thread_id": "session1"}}
-    app.invoke(initial_state, config = config)
-
-
+    config = {'configurable': {"thread_id": "session_v1"}}
+    app.invoke(initial_state, config=config)
 
     while True:
-
         snapshot = app.get_state(config)
-        next_flag = False
-
+        
         if not snapshot.next:
-            print("Game over")
+            print(10*'-')
+            print("Game Over.")
             break
 
-        
-        values = snapshot.values
-        assessments = values.get('assessments',[])  
-        questions = values.get('questions', [])  
+        next_node = snapshot.next[0] 
 
-        if assessments:
-            resolved_count = sum(
-                1 for asm in assessments 
-                if asm.tool_calls and asm.tool_calls[0]['name'] == 'parser_tool'
-            )
-
-            if len(questions) > resolved_count:
-                next_flag = False
-            else:
-                next_flag = True
-        
-
-
-        if not next_flag:
+        if next_node == 'human_answer':
+            print(10*'-')
             user_input = input("Type your answer: ")
 
-            if user_input.lower() in ['q', 'quit']:
-                print("Exiting...")
-                break
+            if user_input.lower() in ['q', 'quit']: break
 
-            human_msg = HumanMessage(content=user_input)
-            app.update_state(config, {'user_answers': [human_msg]})
+            app.update_state(config, {'user_answers': [HumanMessage(content=user_input)]})
+            print(10*'-')
+            print("Thinking...")
+
             app.invoke(None, config=config)
-        
-        
-        user_input_next = input("Proceed to next question? (y/n): ")
 
-        if user_input_next != 'y':
-            print("Game over")
-            break
+        elif next_node == 'human_next':
+            print(10*'-')
+            user_input = input("Press [ENTER] for next question (or 'q' to quit)...")
+            
+            if user_input.lower() in ['q', 'quit']: break
+            app.invoke(None, config=config)
 
-        app.invoke(None, config=config)
+        else:
+            app.invoke(None, config=config)
 
         
 
@@ -442,8 +435,8 @@ def run_hitl():
 # implement fix for hint calling - done
 # implement prompt logic to avoid same questions - done
 
-# finish implementation of 'manual next question' 
-# implement a printing function across all nodes (rich lib ?)
+# finish implementation of 'manual next question'  - done
+# implement a printing function across all nodes (rich lib ?) - will be done in separated please take a look at Antigravity branch
 
 if __name__ == "__main__":
     run_hitl()
