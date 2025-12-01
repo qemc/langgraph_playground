@@ -16,6 +16,9 @@ import operator
 dotenv.load_dotenv()
 llm = ChatOpenAI(model = 'gpt-5-nano')
 
+# Flag to suppress prints when using Rich UI
+RICH_UI_MODE = False
+
 class JudgeAnswer(BaseModel):
 
     '''Call this tool when you are ready to submit the final task assesment'''
@@ -132,6 +135,9 @@ tools = [get_hint_tool, JudgeAnswer]
 
 def stats_node(state: QuizzState):
     
+    if RICH_UI_MODE:
+        return  # Skip printing in Rich UI mode
+    
     os.system('clear all')
 
     topic = state['topic']
@@ -196,8 +202,9 @@ def quiz_generator_node(state: QuizzState):
     
     new_token_so_far = calc_tokens(result, state) # Tokens can be counted at the end of Agent job or at reducer function
 
-    print(10*'-')
-    print(question_to_print)
+    if not RICH_UI_MODE:
+        print(10*'-')
+        print(question_to_print)
 
     return {
         'questions': [question_as_aimessage],
@@ -225,8 +232,10 @@ def hint_node(state: QuizzState):
     }
 
     new_token_so_far = calc_tokens(generated_hint_text, state)
-    print(10*'-')
-    print(f'Hint: {generated_hint_text['hint']}')
+    
+    if not RICH_UI_MODE:
+        print(10*'-')
+        print(f'Hint: {generated_hint_text['hint']}')
 
     return{
         'hints': [question_hints],
@@ -241,9 +250,9 @@ def judge_node(state: QuizzState):
         system_prompt='''
 
         You are a quiz judge.
-        - If the user asks for help or is stuck, call the 'provide_hint' tool.
+        - If the user asks for help, call the 'provide_hint' tool.
         - If the user provides an answer, YOU MUST call the 'JudgeAnswer' tool to submit your verdict.
-
+        - Note: The user needs to wirte that needs help or ask for hint. 
         ''',
         user_prompt='''
         Question:
@@ -277,9 +286,10 @@ def parser_node(state: TypedDict):
     parser_call = last_assesment.tool_calls[0]
     assessment_result = JudgeAnswer(**parser_call['args'])
 
-    print(10*'-')
-    print(f'Result: {assessment_result.result}')
-    print(f'Justification: {assessment_result.just}')
+    if not RICH_UI_MODE:
+        print(10*'-')
+        print(f'Result: {assessment_result.result}')
+        print(f'Justification: {assessment_result.just}')
 
     current_score = int(state['score'])
     current_hitpoints = int(state['hitPoints'])
@@ -299,7 +309,8 @@ def after_assesment_router(state: TypedDict):
     last_assesment = state['assessments'][-1]
 
     if not last_assesment.tool_calls:
-        print("An Error occurred")
+        if not RICH_UI_MODE:
+            print("An Error occurred")
         return "__end__"
 
     tool_name = last_assesment.tool_calls[0]['name']
@@ -309,7 +320,8 @@ def after_assesment_router(state: TypedDict):
     elif tool_name == 'JudgeAnswer':
         return 'parser'
 
-    print("An Error occurred")
+    if not RICH_UI_MODE:
+        print("An Error occurred")
     return '__end__'
 
 def final_router(state: TypedDict):
@@ -319,18 +331,21 @@ def final_router(state: TypedDict):
     need_to_score = int(state['need_to_score'])
 
     if current_hitpoints == 0:
-        print('You lost')
+        if not RICH_UI_MODE:
+            print('You lost')
         return '__end__'
 
     elif current_score == 3:
-        print('You won')
+        if not RICH_UI_MODE:
+            print('You won')
         return '__end__'
     
     elif current_score < need_to_score:
         return 'generator'
     
     else:
-        print("An Error occurred")
+        if not RICH_UI_MODE:
+            print("An Error occurred")
         return '__end__'
 
      
@@ -396,26 +411,30 @@ def run_hitl():
         snapshot = app.get_state(config)
         
         if not snapshot.next:
-            print(10*'-')
-            print("Game Over.")
+            if not RICH_UI_MODE:
+                print(10*'-')
+                print("Game Over.")
             break
 
         next_node = snapshot.next[0] 
 
         if next_node == 'human_answer':
-            print(10*'-')
+            if not RICH_UI_MODE:
+                print(10*'-')
             user_input = input("Type your answer: ")
 
             if user_input.lower() in ['q', 'quit']: break
 
             app.update_state(config, {'user_answers': [HumanMessage(content=user_input)]})
-            print(10*'-')
-            print("Thinking...")
+            if not RICH_UI_MODE:
+                print(10*'-')
+                print("Thinking...")
 
             app.invoke(None, config=config)
 
         elif next_node == 'human_next':
-            print(10*'-')
+            if not RICH_UI_MODE:
+                print(10*'-')
             user_input = input("Press [ENTER] for next question (or 'q' to quit)...")
             
             if user_input.lower() in ['q', 'quit']: break
@@ -439,4 +458,9 @@ def run_hitl():
 # implement a printing function across all nodes (rich lib ?) - will be done in separated please take a look at Antigravity branch
 
 if __name__ == "__main__":
-    run_hitl()
+    # Use Rich UI for beautiful terminal interface
+    from rich_ui import run_quiz_with_rich_ui
+    run_quiz_with_rich_ui()
+    
+    # Original basic terminal version (uncomment to use):
+    # run_hitl()
