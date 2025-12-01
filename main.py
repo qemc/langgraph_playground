@@ -243,6 +243,7 @@ def judge_node(state: QuizzState):
         You are a quiz judge.
         - If the user asks for help or is stuck, call the 'provide_hint' tool.
         - If the user provides an answer, YOU MUST call the 'JudgeAnswer' tool to submit your verdict.
+        - Note: The user needs to wirte that needs help or ask for hint. 
 
         ''',
         user_prompt='''
