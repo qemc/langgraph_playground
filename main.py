@@ -16,19 +16,6 @@ import operator
 dotenv.load_dotenv()
 llm = ChatOpenAI(model = 'gpt-5-nano')
 
-class QuizzState(TypedDict):
-
-    hitPoints: int
-    score: int
-    tokens_so_far: float
-    topic: str
-    difficulty: str
-    user_answers: Annotated[List[BaseMessage], add_messages]
-    questions: Annotated[List[BaseMessage], add_messages]
-    assesments: Annotated[List[BaseMessage], add_messages]
-    judge_tools_buffer: Annotated[List[BaseMessage], add_messages]
-    hints: Annotated[List[QuestionHintDict], operator.add]
-
 class JudgeAnswer(BaseModel):
 
     '''Call this tool when you are ready to submit the final task assesment'''
@@ -39,6 +26,17 @@ class QuestionHintDict(TypedDict):
     question: str
     hint: str
 
+class QuizzState(TypedDict):
+
+    hitPoints: int
+    score: int
+    tokens_so_far: float
+    topic: str
+    difficulty: str
+    user_answers: Annotated[List[BaseMessage], add_messages]
+    questions: Annotated[List[BaseMessage], add_messages]
+    assessments: Annotated[List[BaseMessage], add_messages]
+    hints: Annotated[List[QuestionHintDict], operator.add]
 
 def system_user_prompt(
     system_prompt: str,
@@ -208,7 +206,7 @@ def human_node(state:TypedDict):
 
 def hint_node(state: QuizzState):
 
-    last_assessment = state['assesments'][-1]
+    last_assessment = state['assessments'][-1]
     
     if not last_assessment.tool_calls:
         return {"hints": []}
@@ -265,13 +263,13 @@ def judge_node(state: QuizzState):
     assesment = result.get("api_response")
 
     return {
-        'assesments': [assesment],
+        'assessments': [assesment],
         'tokens_so_far': new_token_so_far
     }
 
 def parser_node(state: TypedDict):
 
-    last_assesment = state['assesments'][-1]
+    last_assesment = state['assessments'][-1]
     parser_call = last_assesment.tool_calls[0]
     assessment_result = JudgeAnswer(**parser_call['args'])
 
@@ -290,7 +288,7 @@ def parser_node(state: TypedDict):
 
 def after_assesment_router(state: TypedDict):
 
-    last_assesment = state['assesments'][-1]
+    last_assesment = state['assessments'][-1]
 
     if not last_assesment.tool_calls:
         print("An Error occurred")
@@ -373,31 +371,67 @@ initial_state = {
     'difficulty': 'easy',
     'user_answers': [],
     'questions': [],
-    'assesments': []
+    'assessments': [],
+    'hints': []
 }
+ 
+
 
 def run_hitl():
 
     config = {'configurable': {"thread_id": "session1"}}
     app.invoke(initial_state, config = config)
 
+
+
     while True:
 
         snapshot = app.get_state(config)
+        next_flag = False
 
         if not snapshot.next:
             print("Game over")
             break
+
         
-        user_input = input("Type your answer: ")
-        if user_input.lower() in ['q', 'quit']:
-            print("Exiting...")
+        values = snapshot.values
+        assessments = values.get('assessments',[])  
+        questions = values.get('questions', [])  
+
+        if assessments:
+            resolved_count = sum(
+                1 for asm in assessments 
+                if asm.tool_calls and asm.tool_calls[0]['name'] == 'parser_tool'
+            )
+
+            if len(questions) > resolved_count:
+                next_flag = False
+            else:
+                next_flag = True
+        
+
+
+        if not next_flag:
+            user_input = input("Type your answer: ")
+
+            if user_input.lower() in ['q', 'quit']:
+                print("Exiting...")
+                break
+
+            human_msg = HumanMessage(content=user_input)
+            app.update_state(config, {'user_answers': [human_msg]})
+            app.invoke(None, config=config)
+        
+        
+        user_input_next = input("Proceed to next question? (y/n): ")
+
+        if user_input_next != 'y':
+            print("Game over")
             break
 
-        human_msg = HumanMessage(content=user_input)
-        app.update_state(config, {'user_answers': [human_msg]})
-
         app.invoke(None, config=config)
+
+        
 
 
 # To Do:
@@ -408,7 +442,7 @@ def run_hitl():
 # implement fix for hint calling - done
 # implement prompt logic to avoid same questions - done
 
-# implement manual 'next question' step (implement routing capabilities withn the hitl function)
+# finish implementation of 'manual next question' 
 # implement a printing function across all nodes (rich lib ?)
 
 if __name__ == "__main__":
